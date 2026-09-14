@@ -4,7 +4,9 @@ Historical cryptocurrency data ETL pipeline. Full spec and 5-phase roadmap: `cry
 
 ## Status
 
-Phases 1, 2, 4, and 5 are done; Phase 3 (resampling & features) is partially done - real per-level order-book BBO/spread data doesn't exist as a free bulk download from any of the three exchanges, so that part of Task 3.2 plus the liquidity-dry-up rule have no real data source (see "Order-book data" below). Binance's `bookDepth` archive (percentage-bucketed depth, not raw levels) *is* real and ingested. See `README.md` for the up-to-date phase checklist.
+Phases 1, 2, 4, and 5 are done; Phase 3 (resampling & features) is partially done - real per-level order-book BBO/spread data doesn't exist as a free bulk download from any of the three exchanges, so that part of Task 3.2 plus the liquidity-dry-up rule have no real data source (see "Order-book data" below). Binance's `bookDepth` archive (percentage-bucketed depth, not raw levels) *is* real and ingested. See `README.md` for the up-to-date phase checklist and the "What's next" section.
+
+The gold-layer output has been verified against a real dataset (52.5M-row BTCUSDT January 2024) and visualized in a published Artifact dashboard - see `README.md`'s top for the link. Don't assume the pipeline has only ever run against small synthetic fixtures.
 
 ## Structure
 
@@ -63,3 +65,4 @@ python -m crypto_pipeline.cli binance --market spot --symbol BTCUSDT --start 202
 - `glob.glob()` needs `recursive=True` for a `**` pattern to actually recurse - a bug in `run_resample` was caught by smoke-testing the CLI end-to-end rather than only unit tests, and is now fixed. Prefer an end-to-end CLI smoke test (not just unit tests) when changing path-globbing or CLI wiring.
 - This machine's local timezone is Asia/Karachi (UTC+5), which is *not* UTC - a DuckDB `to_timestamp()` column rendered as `+05:00`-shifted local time despite being labeled "(UTC)" in the `report` command, caught by the same kind of CLI smoke test. Use `make_timestamp(<epoch_us>)` (not `to_timestamp(<epoch_s>)`) to get a naive UTC-wall-clock timestamp with no local-zone conversion. Windows also has no built-in IANA tzdata - the `tzdata` package is a dependency (Windows-only marker in pyproject.toml) so `zoneinfo`/duckdb/polars timezone lookups don't crash.
 - Phase 5 (QA/validation, sample export) is done - see `qa/` above.
+- This machine also has Node.js (LTS) installed now, purely for the `dataviz` skill's `scripts/validate_palette.js` color-accessibility checker when building chart/dashboard Artifacts - it is not a project dependency and nothing under `src/` uses it.

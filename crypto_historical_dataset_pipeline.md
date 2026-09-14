@@ -111,6 +111,8 @@ All raw ingested data must be normalized into standardized relational/columnar s
 ## 5. Implementation Roadmap & Claude Code Tasks
 
 > **Implementation status (2026-09-14)**: all tasks below are implemented; see [README.md](README.md) for the file-by-file breakdown and [CLAUDE.md](CLAUDE.md) for codebase structure/conventions. One data-availability gap, not a code gap: no exchange publishes real per-level L2 order books (raw bid/ask + BBO/spread) as a free bulk historical archive, so Task 3.2's spread/mid-price half and Task 5.1's negative-spread check are implemented against synthetic data only - see the "Order-book data" section of README.md for what's real (Binance's `bookDepth` percentage-depth archive) versus what would need a live capture or paid vendor.
+>
+> **Verified against real data (2026-09-14)**: a genuine BTCUSDT January 2024 monthly archive (52,549,865 trades, 3.7GB uncompressed) was normalized end-to-end, resampled to 44,640 gap-free 1-minute bars, passed the quality report with zero invalid rows, and is visualized in a published dashboard (link at the top of README.md). This run exposed and fixed a real out-of-memory bug in the normalize/resample path on memory-constrained machines - see README.md's Phase 2 section and CLAUDE.md's Conventions for the fix (chunked ingestion + lazy streaming). See README.md's "What's next" for suggested follow-on work.
 
 ### Phase 1: Ingestion Engine & Download Automation
 - [x] **Task 1.1: Binance Public Archive Harvester**

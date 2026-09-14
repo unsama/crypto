@@ -3,6 +3,8 @@
 Large-scale historical cryptocurrency data pipeline & dataset generation.
 See [crypto_historical_dataset_pipeline.md](crypto_historical_dataset_pipeline.md) for the full spec and roadmap.
 
+**Dashboard**: [BTC-USDT Ledger](https://claude.ai/code/artifact/f5bd5a9e-8012-4320-83fd-cc28f81af172) — a published Artifact charting the real January 2024 dataset built below (candlestick + volume at 1-minute resolution, KPI tiles, top volume-surge events). Not yet visually confirmed by the user as of 2026-09-14 (network issues on this machine blocked the usual self-check after publishing) - see "What's next" for the pending confirm.
+
 ## Status
 
 **Phase 1: Ingestion Engine & Download Automation** — done.
@@ -92,7 +94,7 @@ python -m crypto_pipeline.cli normalize binance-bookdepth --symbol BTCUSDT `
 ```powershell
 # Resample normalized trades into OHLCV bars with realized volatility and event tags
 python -m crypto_pipeline.cli resample --timeframe 1m `
-    --path "data/gold/trades/exchange=binance/symbol=BTC-USDT/**/data.parquet"
+    --path "data/gold/trades/exchange=binance/symbol=BTC-USDT/**/*.parquet"
 ```
 
 Bars land under `data/gold/bars/exchange=.../symbol=.../year=.../month=.../data.parquet` the same way.
@@ -115,3 +117,14 @@ python -m crypto_pipeline.cli sample-export --exchange binance --symbol BTC-USDT
 ```powershell
 pytest
 ```
+
+## What's next
+
+All 5 phases of the original spec are implemented and verified against a real 52.5M-row dataset (see Phase 2 above). Reasonable next directions, roughly in priority order:
+
+1. **Confirm the dashboard renders correctly.** Published 2026-09-14 but not yet visually confirmed - network issues on this machine blocked the self-check. Open the link above and report back if anything looks broken.
+2. **Scale up real coverage.** Pull more symbols (ETHUSDT, etc.), more months, and Bybit/Kraken data through the now-fixed (chunked/streaming) pipeline - it was only proven against one BTCUSDT month so far.
+3. **Automate recurring ingestion.** A scheduled Task Scheduler/cron entry calling `binance`/`normalize`/`resample` on a schedule so the lake stays current, rather than manual one-off runs.
+4. **Decide on the order-book gap.** Real per-level BBO/spread data doesn't exist as a free bulk download anywhere (see "Order-book data" above) - closing it means either a live WebSocket depth-stream recorder or a paid vendor (Tardis.dev). Worth a deliberate decision, not more free-archive searching.
+5. **Verify `binance_bookdepth.py`'s schema assumption** against a real downloaded file once network access allows it (currently unverified, see Phase 3 above).
+6. **Extend `transform/symbols.py`** if/when a pair's `BASE-QUOTE` split comes out wrong - it's a static best-effort table, not a live exchange lookup.
