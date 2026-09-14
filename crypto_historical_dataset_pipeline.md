@@ -110,54 +110,56 @@ All raw ingested data must be normalized into standardized relational/columnar s
 
 ## 5. Implementation Roadmap & Claude Code Tasks
 
+> **Implementation status (2026-09-14)**: all tasks below are implemented; see [README.md](README.md) for the file-by-file breakdown and [CLAUDE.md](CLAUDE.md) for codebase structure/conventions. One data-availability gap, not a code gap: no exchange publishes real per-level L2 order books (raw bid/ask + BBO/spread) as a free bulk historical archive, so Task 3.2's spread/mid-price half and Task 5.1's negative-spread check are implemented against synthetic data only - see the "Order-book data" section of README.md for what's real (Binance's `bookDepth` percentage-depth archive) versus what would need a live capture or paid vendor.
+
 ### Phase 1: Ingestion Engine & Download Automation
-- [ ] **Task 1.1: Binance Public Archive Harvester**
+- [x] **Task 1.1: Binance Public Archive Harvester**
   - Build asynchronous scraper/downloader for `data.binance.vision`.
   - Target prefixes: `data/spot/monthly/trades/`, `data/spot/monthly/aggTrades/`, `data/futures/um/monthly/trades/`.
   - Implement concurrent checksum verification (`.CHECKSUM` validation).
-- [ ] **Task 1.2: Bybit & Kraken Archive Fetchers**
+- [x] **Task 1.2: Bybit & Kraken Archive Fetchers**
   - Implement Bybit open-access historical execution parser.
   - Implement Kraken historical trade paginator using `https://api.kraken.com/0/public/Trades`.
-- [ ] **Task 1.3: Download Manager & Resiliency**
+- [x] **Task 1.3: Download Manager & Resiliency**
   - Implement resume capability, exponential backoff, rate-limiting, and local caching.
 
 ### Phase 2: Schema Normalization & High-Throughput Processing
-- [ ] **Task 2.1: Ingestion Workers & Polars Transformer**
+- [x] **Task 2.1: Ingestion Workers & Polars Transformer**
   - Read raw daily/monthly `.zip` / `.csv.gz` streams directly into Polars streaming engine without uncompressing to disk.
   - Apply standard unified schema across exchanges.
-- [ ] **Task 2.2: Data Cleaning & Deduplication**
+- [x] **Task 2.2: Data Cleaning & Deduplication**
   - Detect out-of-order timestamps and sort deterministically.
   - Deduplicate trades based on `(exchange, symbol, trade_id)`.
   - Fix edge-case numeric overflows and scientific notations.
 
 ### Phase 3: Resampling & Feature Generation
-- [ ] **Task 3.1: Resampling Engine (Tick -> 1-Second & 1-Minute Bars)**
+- [x] **Task 3.1: Resampling Engine (Tick -> 1-Second & 1-Minute Bars)**
   - Implement high-performance resampling generating OHLC, volume, and tick count.
   - Calculate buyer/seller trade imbalance (`volume_delta`).
   - Calculate instantaneous VWAP: `sum(price * volume) / sum(volume)`.
-- [ ] **Task 3.2: Order Book Metrics & Derived Indicators**
+- [x] **Task 3.2: Order Book Metrics & Derived Indicators** — realized volatility and percentage-bucketed depth (Binance `bookDepth`) run against real data; bid-ask spread/spread bps need real per-level BBO data, which doesn't exist as a free bulk archive anywhere (implemented and tested against synthetic snapshots only).
   - Compute rolling 1-minute and 5-minute Realized Volatility ($\sigma = \sqrt{\sum r_t^2}$).
   - Calculate bid-ask spreads, spread bps, and cumulative market depth at $\pm 1\%$ and $\pm 2\%$.
-- [ ] **Task 3.3: Specific Market-Event & Filter Engine**
+- [x] **Task 3.3: Specific Market-Event & Filter Engine**
   - Build configurable rule engine to tag market events:
     - Flash crashes / spikes (price change $> X\%$ in $T$ seconds).
-    - Liquidity dry-ups (spread blowouts $> Y$ bps).
+    - Liquidity dry-ups (spread blowouts $> Y$ bps) — same missing-BBO-data caveat as Task 3.2.
     - Volume surge anomalies ($Z$-score $> 3.0$).
 
 ### Phase 4: Storage Optimization & Partitioning
-- [ ] **Task 4.1: Parquet Partitioning Strategy**
+- [x] **Task 4.1: Parquet Partitioning Strategy**
   - Write output files using standard hive partitioning:
     `output_lake/trades/exchange={exchange}/symbol={symbol}/year={YYYY}/month={MM}/data.parquet`
   - Target optimal row-group sizing (128 MB to 512 MB) with ZSTD level 3 compression.
-- [ ] **Task 4.2: DuckDB / SQLite Query Interface**
+- [x] **Task 4.2: DuckDB / SQLite Query Interface**
   - Provide ready-to-query scripts for instant local SQL exploration across partitioned Parquet directories without database loading overhead.
 
 ### Phase 5: QA, Validation & Client Sample Packaging
-- [ ] **Task 5.1: Data Quality & Completeness Auditor**
+- [x] **Task 5.1: Data Quality & Completeness Auditor**
   - Run continuous timestamp gap detection (flagging intervals with zero trades during open market hours).
-  - Check for zero-volume or negative-spread anomalies.
+  - Check for zero-volume or negative-spread anomalies — negative-spread check needs real BBO data (see Task 3.2 caveat).
   - Generate automated summary markdown report (row counts, date ranges, min/max prices).
-- [ ] **Task 5.2: Sample Exporter**
+- [x] **Task 5.2: Sample Exporter**
   - CLI command to slice and export a standardized 24-hour verification package for any pair/exchange in CSV and Parquet formats.
 
 ---
