@@ -11,10 +11,12 @@ See [crypto_historical_dataset_pipeline.md](crypto_historical_dataset_pipeline.m
 - [x] Task 1.2 — Bybit & Kraken fetchers (`src/crypto_pipeline/ingestion/bybit.py`, `kraken.py`)
 - [x] Task 1.3 — Resilient download manager: resume, backoff, rate limiting, caching (`src/crypto_pipeline/ingestion/download_manager.py`)
 
-**Phase 2: Schema Normalization & High-Throughput Processing** — done.
+**Phase 2: Schema Normalization & High-Throughput Processing** — done, verified against real data.
 
-- [x] Task 2.1 — Polars transformers mapping each exchange's raw archive format onto the unified `trades_tick` schema, reading zip/gzip members directly without extracting to disk (`src/crypto_pipeline/transform/binance.py`, `bybit.py`, `kraken.py`)
+- [x] Task 2.1 — Polars transformers mapping each exchange's raw archive format onto the unified `trades_tick` schema, extracting the zip's CSV to a scratch temp file and lazily `scan_csv`-ing it so the read → transform → filter → sort → dedupe → write chain runs through polars' streaming engine end to end (`src/crypto_pipeline/transform/binance.py`, `bybit.py`, `kraken.py`)
 - [x] Task 2.2 — Cleaning: drop invalid rows (non-positive price/qty, null id/timestamp), deterministic sort, dedupe on `(exchange, symbol, trade_id)` (`src/crypto_pipeline/transform/schema.py`)
+
+**Real-scale verification (2026-09-14)**: normalized a genuine BTCUSDT January 2024 monthly archive from `data.binance.vision` — 52,549,865 trades, 3.7GB uncompressed CSV — end to end into the gold-layer lake, then resampled to 44,640 one-minute bars (31 days × 24h × 60m, zero gaps) with realized volatility and event tagging. This is what pushed the streaming fix: a naive eager `read_csv`/`collect()` OOM'd on this machine's ~4.76GB free RAM even after removing the original all-Utf8 parsing bug, so large single-archive processing goes through `transform.pipeline.normalize_binance_file_chunks()` (row-range chunks, ~5M rows each, each finalized independently and written as its own `part-N.parquet` file via `storage.partition.write_hive_partitioned(..., part_name=...)` rather than the merge-and-rewrite `data.parquet` path, which would otherwise re-read everything written by prior chunks on every call). `resample`'s trade-reading path was fixed the same way — `pl.scan_parquet` + streaming collect, never materializing the full trades table before aggregating down to bars.
 
 Known limitation: symbol normalization (`transform/symbols.py`) is a static best-effort `BASE-QUOTE` splitter, not a live lookup against each exchange's instruments/assets endpoint — it covers common quote assets and Kraken's major legacy asset codes, but exotic pairs may need the table extended.
 
@@ -85,7 +87,7 @@ python -m crypto_pipeline.cli normalize binance-bookdepth --symbol BTCUSDT `
     --path data/bronze/raw/binance/futures/um/daily/bookDepth/BTCUSDT/BTCUSDT-bookDepth-2024-01-01.zip
 ```
 
-Normalized trades land under `data/gold/trades/exchange=<exchange>/symbol=<symbol>/year=<YYYY>/month=<MM>/data.parquet` (gitignored) unless `--out` is given for a flat single-file path instead.
+`normalize binance` (without `--out`) processes in memory-bounded chunks and lands trades under `data/gold/trades/exchange=<exchange>/symbol=<symbol>/year=<YYYY>/month=<MM>/part-<archive>-<NNNN>.parquet` (gitignored) - one file per ~5M-row chunk rather than a single `data.parquet`, so a full month of a high-volume pair never needs to fit in memory all at once. `query`/`report`/`resample` glob every `*.parquet` in a partition, so this is transparent to anything reading the lake back. Pass `--out` for the old flat single-file behavior instead (fine for smaller archives; not memory-bounded).
 
 ```powershell
 # Resample normalized trades into OHLCV bars with realized volatility and event tags

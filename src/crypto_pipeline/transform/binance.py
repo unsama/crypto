@@ -34,34 +34,51 @@ def _looks_numeric(value: str) -> bool:
     return True
 
 
-def _read_archive_csv(zip_path: Path, columns: list[str]) -> pl.DataFrame:
-    """Read the single CSV member of a Binance archive zip into memory as strings.
+def extract_csv_member(zip_path: Path, dest_dir: Path) -> Path:
+    """Extract the single CSV member of a Binance archive zip to `dest_dir`, return its path.
 
-    Binance archives are inconsistent about whether they include a header
-    row, so every column is read as Utf8 (no type inference) and the
-    header row, if present, is detected by checking whether the first id
-    value parses as a number, then dropped. Callers cast columns to their
-    real types explicitly downstream.
+    A sequential disk-to-disk decompression (zipfile streams in bounded
+    chunks internally), so this holds only a small buffer in memory
+    regardless of file size - unlike reading the member into memory
+    first, which would need to hold the entire decompressed CSV at once.
     """
     with zipfile.ZipFile(zip_path) as zf:
         members = [n for n in zf.namelist() if n.endswith(".csv")]
         if len(members) != 1:
-            raise ValueError(f"expected exactly one .csv member in {zip_path}, found {zf.namelist()}")
-        with zf.open(members[0]) as f:
-            df = pl.read_csv(
-                f,
-                has_header=False,
-                new_columns=columns,
-                infer_schema_length=0,
-            )
-
-    if df.height and not _looks_numeric(df[columns[0]][0]):
-        df = df.slice(1, df.height - 1)
-    return df
+            raise ValueError(f"expected exactly one .csv member in {zip_path}, found {members}")
+        extracted = zf.extract(members[0], path=dest_dir)
+    return Path(extracted)
 
 
-def read_binance_trades(zip_path: Path, market: str, symbol: str, data_type: str = "trades") -> pl.LazyFrame:
-    """Map a raw Binance trades/aggTrades archive onto the unified trades_tick schema."""
+def _read_archive_csv(csv_path: Path, columns: list[str]) -> pl.LazyFrame:
+    """Lazily scan an already-extracted Binance trades/aggTrades CSV with native dtypes.
+
+    Binance archives are inconsistent about whether they include a header
+    row, so a cheap first-line peek decides whether to skip a header
+    (letting polars infer real dtypes from the data) versus scanning
+    headerless with explicit column names. `scan_csv` (not `read_csv`)
+    keeps this lazy so the caller's full read -> transform -> filter ->
+    sort -> write chain can run through polars' streaming engine without
+    ever materializing the whole file as one in-memory DataFrame - a
+    real multi-million-row monthly archive OOM'd under an earlier eager,
+    all-Utf8-typed version of this function.
+    """
+    with csv_path.open("r", encoding="utf-8", errors="replace") as f:
+        first_line = f.readline()
+    first_field = first_line.split(",", 1)[0].strip()
+    has_header = not _looks_numeric(first_field)
+
+    if has_header:
+        lf = pl.scan_csv(csv_path)
+        lf = lf.rename(dict(zip(lf.collect_schema().names(), columns[: len(lf.collect_schema().names())])))
+    else:
+        lf = pl.scan_csv(csv_path, has_header=False, new_columns=columns)
+
+    return lf
+
+
+def read_binance_trades(csv_path: Path, market: str, symbol: str, data_type: str = "trades") -> pl.LazyFrame:
+    """Map an already-extracted Binance trades/aggTrades CSV onto the unified trades_tick schema."""
     if market not in MARKET_TYPE_MAP:
         raise ValueError(f"unknown Binance market {market!r}")
     market_type = MARKET_TYPE_MAP[market]
@@ -75,13 +92,12 @@ def read_binance_trades(zip_path: Path, market: str, symbol: str, data_type: str
     else:
         raise ValueError(f"unknown Binance data_type {data_type!r}")
 
-    df = _read_archive_csv(zip_path, columns)
-    lf = df.lazy().with_columns(
+    lf = _read_archive_csv(csv_path, columns).with_columns(
         pl.col(id_col).cast(pl.Utf8).alias("trade_id"),
         pl.col("price").cast(pl.Float64).alias("price"),
         pl.col(qty_col).cast(pl.Float64).alias("quantity"),
         pl.col(time_col).cast(pl.Int64).mul(1000).alias("timestamp_utc"),  # ms -> us
-        pl.when(pl.col("is_buyer_maker").str.to_lowercase() == "true")
+        pl.when(pl.col("is_buyer_maker").cast(pl.Utf8).str.to_lowercase() == "true")
         .then(pl.lit("sell"))
         .otherwise(pl.lit("buy"))
         .alias("side"),

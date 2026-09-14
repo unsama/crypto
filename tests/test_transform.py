@@ -5,6 +5,7 @@ from pathlib import Path
 
 from crypto_pipeline.transform.pipeline import (
     normalize_binance_file,
+    normalize_binance_file_chunks,
     normalize_bybit_file,
     normalize_kraken_pair,
 )
@@ -78,6 +79,26 @@ def test_normalize_binance_drops_invalid_rows(tmp_path: Path):
 
     assert df.height == 1
     assert df["trade_id"][0] == "2"
+
+
+def test_normalize_binance_file_chunks_covers_all_rows_across_boundaries(tmp_path: Path):
+    rows = [
+        "1,50000.0,0.1,5000.00,1704067200000,True,True",
+        "2,50001.0,0.2,10000.20,1704067201000,False,True",
+        "3,50002.0,0.1,5000.20,1704067202000,False,True",
+        "4,50003.0,0.1,5000.30,1704067203000,False,True",
+        "5,50004.0,0.1,5000.40,1704067204000,False,True",
+    ]
+    zip_path = _make_binance_zip(tmp_path, rows, header=None)
+
+    chunks = list(
+        normalize_binance_file_chunks(zip_path, market="spot", symbol="BTCUSDT", data_type="trades", chunk_rows=2)
+    )
+
+    assert len(chunks) == 3  # 5 rows in chunks of 2 -> 2, 2, 1
+    assert [c.height for c in chunks] == [2, 2, 1]
+    all_ids = sorted(int(t) for c in chunks for t in c["trade_id"])
+    assert all_ids == [1, 2, 3, 4, 5]
 
 
 def test_normalize_bybit_file(tmp_path: Path):

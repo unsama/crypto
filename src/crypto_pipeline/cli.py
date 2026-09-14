@@ -53,6 +53,7 @@ from crypto_pipeline.storage.query import connect as connect_lake
 from crypto_pipeline.transform.binance_bookdepth import read_binance_book_depth
 from crypto_pipeline.transform.pipeline import (
     normalize_binance_file,
+    normalize_binance_file_chunks,
     normalize_bybit_file,
     normalize_kraken_pair,
     write_normalized,
@@ -142,8 +143,28 @@ def _write_trades(df: pl.DataFrame, out: Path | None, label: str) -> None:
 
 
 async def run_normalize_binance(args: argparse.Namespace) -> None:
-    df = normalize_binance_file(args.path, market=args.market, symbol=args.symbol, data_type=args.data_type)
-    _write_trades(df, args.out, "binance")
+    if args.out is not None:
+        # Flat single-file export: kept as the original single eager
+        # collect, since it's meant for small ad-hoc slices, not a full
+        # high-volume monthly archive (use the default partitioned path
+        # below for those - it processes in memory-bounded chunks).
+        df = normalize_binance_file(args.path, market=args.market, symbol=args.symbol, data_type=args.data_type)
+        _write_trades(df, args.out, "binance")
+        return
+
+    total_rows = 0
+    total_parts = 0
+    for i, chunk_df in enumerate(
+        normalize_binance_file_chunks(args.path, market=args.market, symbol=args.symbol, data_type=args.data_type)
+    ):
+        written = write_hive_partitioned(
+            chunk_df, GOLD_DIR, "trades", "timestamp_utc", part_name=f"{args.path.stem}-{i:04d}"
+        )
+        total_rows += chunk_df.height
+        total_parts += len(written)
+        print(f"normalize binance: chunk {i} - {chunk_df.height:,} row(s) -> {len(written)} part file(s)")
+
+    print(f"normalize binance: {total_rows:,} row(s) total -> {total_parts} part file(s) under {GOLD_DIR / 'trades'}")
 
 
 async def run_normalize_bybit(args: argparse.Namespace) -> None:
@@ -161,8 +182,12 @@ async def run_resample(args: argparse.Namespace) -> None:
     if not paths:
         raise SystemExit(f"no files matched {args.path!r}")
 
-    df = pl.concat([pl.read_parquet(p) for p in paths])
-    bars = resample_trades_to_bars(df, timeframe=args.timeframe)
+    # Lazy scan, not eager read+concat: a full month of a high-volume pair
+    # is 50M+ trade rows, too large to materialize before resampling on a
+    # memory-constrained machine. Only the much smaller bar output below
+    # is ever collected.
+    lf = pl.scan_parquet(paths)
+    bars = resample_trades_to_bars(lf, timeframe=args.timeframe)
 
     for window in ("1m", "5m"):
         n = bars_per_window(args.timeframe, window)

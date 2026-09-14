@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from crypto_pipeline.storage.partition import write_hive_partitioned
 from crypto_pipeline.storage.query import connect
@@ -88,6 +89,36 @@ def test_write_hive_partitioned_empty_frame_writes_nothing(tmp_path: Path):
     assert written == []
 
 
+def test_write_hive_partitioned_part_name_writes_separate_files(tmp_path: Path):
+    jan_us = 1_704_067_200_000_000
+    chunk1 = _trades(
+        [{"symbol": "BTC-USDT", "trade_id": "1", "price": 100.0, "quantity": 1.0, "quote_quantity": 100.0, "side": "buy", "timestamp_utc": jan_us}]
+    )
+    chunk2 = _trades(
+        [{"symbol": "BTC-USDT", "trade_id": "2", "price": 101.0, "quantity": 1.0, "quote_quantity": 101.0, "side": "sell", "timestamp_utc": jan_us + 1_000_000}]
+    )
+
+    written1 = write_hive_partitioned(chunk1, tmp_path, "trades", "timestamp_utc", part_name="0000")
+    written2 = write_hive_partitioned(chunk2, tmp_path, "trades", "timestamp_utc", part_name="0001")
+
+    partition_dir = tmp_path / "trades" / "exchange=binance" / "symbol=BTC-USDT" / "year=2024" / "month=01"
+    assert written1 == [partition_dir / "part-0000.parquet"]
+    assert written2 == [partition_dir / "part-0001.parquet"]
+    assert (partition_dir / "part-0000.parquet").exists()
+    assert (partition_dir / "part-0001.parquet").exists()
+    # each part file holds only its own chunk, no read-back/merge of the other
+    assert pl.read_parquet(partition_dir / "part-0000.parquet").height == 1
+    assert pl.read_parquet(partition_dir / "part-0001.parquet").height == 1
+
+
+def test_write_hive_partitioned_part_name_and_merge_key_conflict(tmp_path: Path):
+    df = _trades(
+        [{"symbol": "BTC-USDT", "trade_id": "1", "price": 100.0, "quantity": 1.0, "quote_quantity": 100.0, "side": "buy", "timestamp_utc": 1_704_067_200_000_000}]
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        write_hive_partitioned(df, tmp_path, "trades", "timestamp_utc", merge_key=["trade_id"], part_name="0000")
+
+
 def test_connect_and_query_lake(tmp_path: Path):
     jan_us = 1_704_067_200_000_000
     df = _trades(
@@ -108,3 +139,19 @@ def test_connect_and_query_lake(tmp_path: Path):
         "SELECT DISTINCT exchange, symbol, CAST(year AS INTEGER), CAST(month AS INTEGER) FROM trades"
     ).fetchone()
     assert partition_row == ("binance", "BTC-USDT", 2024, 1)
+
+
+def test_connect_queries_across_multiple_part_files(tmp_path: Path):
+    jan_us = 1_704_067_200_000_000
+    chunk1 = _trades(
+        [{"symbol": "BTC-USDT", "trade_id": "1", "price": 100.0, "quantity": 1.0, "quote_quantity": 100.0, "side": "buy", "timestamp_utc": jan_us}]
+    )
+    chunk2 = _trades(
+        [{"symbol": "BTC-USDT", "trade_id": "2", "price": 101.0, "quantity": 1.0, "quote_quantity": 101.0, "side": "sell", "timestamp_utc": jan_us + 1_000_000}]
+    )
+    write_hive_partitioned(chunk1, tmp_path, "trades", "timestamp_utc", part_name="0000")
+    write_hive_partitioned(chunk2, tmp_path, "trades", "timestamp_utc", part_name="0001")
+
+    con = connect(tmp_path)
+    row = con.sql("SELECT COUNT(*) AS n FROM trades").fetchone()
+    assert row[0] == 2

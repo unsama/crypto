@@ -20,17 +20,17 @@ src/crypto_pipeline/
   transform/
     schema.py                 # unified trades_tick schema + cleaning/dedup/sort (Task 2.2)
     symbols.py                 # best-effort exchange symbol -> BASE-QUOTE normalization
-    binance.py, bybit.py, kraken.py  # raw trades archive -> unified schema parsers (Task 2.1)
+    binance.py, bybit.py, kraken.py  # raw trades archive -> unified schema parsers (Task 2.1); binance.py extracts to a temp file + scan_csv (lazy), not read_csv, for streaming
     binance_bookdepth.py       # raw bookDepth archive -> percentage-bucket depth schema (unverified against a live file, see its docstring)
-    pipeline.py                # normalize_*_file() + write_normalized() (flat, --out path) used by the CLI
+    pipeline.py                # normalize_*_file() (single eager collect) + normalize_binance_file_chunks() (memory-bounded, for large archives) + write_normalized() (flat, --out path)
   features/
     resample.py                # tick trades -> OHLCV bars (Task 3.1); TIMEFRAME_EVERY/TIMEFRAME_SECONDS reused by qa/audit.py
     volatility.py               # rolling realized volatility from bar closes (Task 3.2, price half)
     orderbook.py                 # add_book_metrics(): raw-level spread/mid-price/depth (no data source, synthetic-tested only); pivot_percentage_depth(): real Binance bookDepth -> depth-at-Npct columns
     events.py                    # flash-move, volume-surge, liquidity-dry-up tagging (Task 3.3)
   storage/
-    partition.py                # write_hive_partitioned(): exchange/symbol/year/month Parquet layout (Task 4.1)
-    query.py                     # DuckDB connect() registering a view per dataset dir (Task 4.2)
+    partition.py                # write_hive_partitioned(): exchange/symbol/year/month Parquet layout (Task 4.1); part_name=... writes part-<name>.parquet without merge-read-back, for chunked large-archive ingestion
+    query.py                     # DuckDB connect() registering a view per dataset dir over every *.parquet file (Task 4.2)
   qa/
     audit.py                     # detect_bar_gaps / detect_price_anomalies / detect_negative_spreads (Task 5.1)
     summary.py                    # generate_summary_report(): markdown report over a DuckDB connection (Task 5.1)
@@ -53,7 +53,9 @@ python -m crypto_pipeline.cli binance --market spot --symbol BTCUSDT --start 202
 
 - Async I/O throughout ingestion (`aiohttp`/`aiofiles`); retries via `tenacity`.
 - Every new exchange fetcher should route actual file downloads through `DownloadManager` rather than raw `aiohttp` calls, to keep resume/retry/caching consistent.
-- Raw downloads land under `data/bronze/raw/<exchange>/...`; normalized trades and resampled bars default to hive-partitioned `data/gold/<trades|bars>/exchange=.../symbol=.../year=.../month=.../data.parquet` (via `storage.partition.write_hive_partitioned`) unless `--out` is passed to `normalize`/`resample` for a flat single-file path instead; nothing under `data/` is committed except `.gitkeep`.
+- Raw downloads land under `data/bronze/raw/<exchange>/...`; normalized trades and resampled bars default to hive-partitioned `data/gold/<trades|bars>/exchange=.../symbol=.../year=.../month=.../*.parquet` (via `storage.partition.write_hive_partitioned`) unless `--out` is passed to `normalize`/`resample` for a flat single-file path instead; nothing under `data/` is committed except `.gitkeep`.
+- **Memory-bounded processing of large archives**: `normalize binance` (default path, no `--out`) does NOT eagerly collect the whole file - a full month of a high-volume pair (BTCUSDT spot trades: ~52.5M rows / ~3.7GB uncompressed, confirmed real) will OOM a single eager `read_csv`/`collect()` on a memory-constrained machine even with native dtypes. It uses `transform.pipeline.normalize_binance_file_chunks()` (row-range chunks via `.slice()` on a lazy `scan_csv`, each chunk finalized independently and written as its own `part-<archive>-<NNNN>.parquet` via `write_hive_partitioned(..., part_name=...)`). `resample` reads trades back the same way - `pl.scan_parquet(paths)` (lazy), never `pl.read_parquet` + `pl.concat` (eager) - since `resample_trades_to_bars` now accepts a LazyFrame and only collects the much smaller bar output. Any new code path that reads a whole partition's trades back should do the same: scan lazily, collect only the small aggregated result.
+- `pl.read_csv(..., infer_schema_length=0)` forces every column to Utf8 - looks like a reasonable way to dodge a header-detection problem, but multiplies memory use several times over on a large real file (string storage vs. int64/float64) and is what originally caused the OOM here. Peek the first line to detect a header, then read with native dtype inference instead.
 - `transform/symbols.py` is a static best-effort symbol splitter, not a live exchange lookup — extend its tables rather than assuming it's complete for every pair.
 - **Order-book data**: `add_book_metrics` (raw per-level bid/ask, spread, mid-price) has **no real data source** — no exchange publishes that as a free bulk historical archive, only live trades. It's implemented and tested against synthetic input only. The liquidity-dry-up rule in `features/events.py` needs that same missing spread data. The one real exception is Binance's futures `bookDepth` daily archive (percentage-bucketed cumulative depth, not raw levels, no BBO/spread) — ingested via `binance-bookdepth`/`normalize binance-bookdepth` into `data/gold/book_depth_pct/...`, pivoted to `bid_depth_usd_Npct`/`ask_depth_usd_Npct` via `pivot_percentage_depth`. `transform/binance_bookdepth.py`'s column names are recalled from documentation, **not verified against a live file** (this machine can't reach data.binance.vision) — verify against a real download before trusting it in production; it raises a clear error on an unexpected schema rather than mis-parsing silently.
 - Rolling/Z-score baselines should exclude the current row (see `tag_volume_surges`'s use of `.shift(1)`) - including it dilutes exactly the anomaly you're trying to detect.

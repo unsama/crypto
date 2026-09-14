@@ -39,24 +39,30 @@ def bars_per_window(bar_timeframe: str, window: str) -> int | None:
     return window_secs // bar_secs
 
 
-def resample_trades_to_bars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
+def resample_trades_to_bars(df: pl.DataFrame | pl.LazyFrame, timeframe: str) -> pl.DataFrame:
     """Resample unified trades_tick rows (any mix of exchanges/symbols) into OHLCV bars.
 
     Groups by (exchange, symbol) so multiple instruments can be passed in
     the same DataFrame. VWAP and buy/sell volume split use the taker
     `side` and `quantity`/`quote_quantity` columns from the trades_tick
     schema (spec section 3.1).
+
+    Accepts a LazyFrame (e.g. from `pl.scan_parquet`) so a large input -
+    a full month of a high-volume pair can be 50M+ trade rows - never
+    needs to be materialized eagerly before resampling; only the much
+    smaller bar output is collected.
     """
     if timeframe not in TIMEFRAME_EVERY:
         raise ValueError(f"unsupported timeframe {timeframe!r}")
 
-    if df.height == 0:
-        return pl.DataFrame(schema=BAR_SCHEMA)
+    if isinstance(df, pl.DataFrame):
+        if df.height == 0:
+            return pl.DataFrame(schema=BAR_SCHEMA)
+        df = df.lazy()
 
     every = TIMEFRAME_EVERY[timeframe]
     bars = (
-        df.lazy()
-        .with_columns(pl.from_epoch("timestamp_utc", time_unit="us").alias("_ts"))
+        df.with_columns(pl.from_epoch("timestamp_utc", time_unit="us").alias("_ts"))
         .sort("_ts")
         .group_by_dynamic("_ts", every=every, closed="left", label="left", group_by=["exchange", "symbol"])
         .agg(
@@ -79,4 +85,4 @@ def resample_trades_to_bars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
         .select(BAR_COLUMNS)
         .sort(["exchange", "symbol", "bar_timestamp_utc"])
     )
-    return bars.collect()
+    return bars.collect(engine="streaming")

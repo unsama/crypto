@@ -37,8 +37,9 @@ def write_hive_partitioned(
     dataset: str,
     time_column: str,
     merge_key: list[str] | None = None,
+    part_name: str | None = None,
 ) -> list[Path]:
-    """Write `df` into hive partitions under `root/dataset/exchange=.../symbol=.../year=.../month=.../data.parquet`.
+    """Write `df` into hive partitions under `root/dataset/exchange=.../symbol=.../year=.../month=.../<file>.parquet`.
 
     If `merge_key` is given and a partition file already exists, new rows
     are merged with the existing file (concatenated, deduped on
@@ -48,9 +49,21 @@ def write_hive_partitioned(
     each touched partition file is fully overwritten from `df` alone,
     which is what gives identical re-runs of the same batch bit-identical
     output (spec section 6's determinism criterion).
+
+    `part_name`, if given, writes to `part-{part_name}.parquet` instead
+    of `data.parquet` and skips the merge-read-back entirely (incompatible
+    with `merge_key`) - for incrementally building one very large
+    partition from many small chunks (see
+    `transform.pipeline.normalize_binance_file_chunks`), where reading
+    back everything written by prior chunks on every call would defeat
+    the point of chunking in the first place. `storage.query.connect`
+    globs every `*.parquet` in a partition directory, so multi-part and
+    single-`data.parquet` partitions are both queryable the same way.
     """
     if df.height == 0:
         return []
+    if part_name is not None and merge_key is not None:
+        raise ValueError("part_name and merge_key are mutually exclusive")
 
     df = _with_year_month(df, time_column)
     written: list[Path] = []
@@ -60,18 +73,23 @@ def write_hive_partitioned(
             root / dataset / f"exchange={exchange}" / f"symbol={symbol}" / f"year={year}" / f"month={month:02d}"
         )
         partition_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = partition_dir / "data.parquet"
 
         out = group.drop(["_year", "_month"])
-        if merge_key and dest_path.exists():
-            existing = pl.read_parquet(dest_path)
-            out = (
-                pl.concat([existing, out], how="vertical_relaxed")
-                .unique(subset=merge_key, keep="last", maintain_order=True)
-                .sort(time_column)
-            )
-        else:
+
+        if part_name is not None:
+            dest_path = partition_dir / f"part-{part_name}.parquet"
             out = out.sort(time_column)
+        else:
+            dest_path = partition_dir / "data.parquet"
+            if merge_key and dest_path.exists():
+                existing = pl.read_parquet(dest_path)
+                out = (
+                    pl.concat([existing, out], how="vertical_relaxed")
+                    .unique(subset=merge_key, keep="last", maintain_order=True)
+                    .sort(time_column)
+                )
+            else:
+                out = out.sort(time_column)
 
         out.write_parquet(
             dest_path,
