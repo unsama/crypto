@@ -50,15 +50,18 @@ from crypto_pipeline.qa.sample_export import export_sample
 from crypto_pipeline.qa.summary import generate_summary_report
 from crypto_pipeline.storage.partition import write_hive_partitioned
 from crypto_pipeline.storage.query import connect as connect_lake
+from crypto_pipeline.transform.binance_bookdepth import read_binance_book_depth
 from crypto_pipeline.transform.pipeline import (
     normalize_binance_file,
     normalize_bybit_file,
     normalize_kraken_pair,
     write_normalized,
 )
+from crypto_pipeline.transform.symbols import normalize_symbol
 
 TRADE_MERGE_KEY = ["exchange", "symbol", "trade_id"]
 BAR_MERGE_KEY = ["exchange", "symbol", "timeframe", "bar_timestamp_utc"]
+BOOK_DEPTH_MERGE_KEY = ["exchange", "symbol", "timestamp_utc", "percentage"]
 
 
 def _parse_month(value: str) -> date:
@@ -101,6 +104,32 @@ async def run_kraken(args: argparse.Namespace) -> None:
         pages = await fetcher.fetch_range(pair=args.pair, start_ns=start_ns, end_ns=end_ns)
         total_trades = sum(p.trade_count for p in pages)
         print(f"kraken: {len(pages)} page(s), {total_trades} trade(s)")
+
+
+async def run_binance_bookdepth(args: argparse.Namespace) -> None:
+    async with DownloadManager(concurrency=args.concurrency) as dm:
+        harvester = BinanceArchiveHarvester(dm)
+        paths = await harvester.harvest_daily(
+            market="futures/um",
+            symbol=args.symbol,
+            start=args.start,
+            end=args.end,
+            data_type="bookDepth",
+        )
+        print(f"binance-bookdepth: {len(paths)} file(s) ready")
+
+
+async def run_normalize_binance_bookdepth(args: argparse.Namespace) -> None:
+    lf = read_binance_book_depth(args.path, symbol=args.symbol)
+    df = lf.with_columns(pl.lit(normalize_symbol(args.symbol, "binance")).alias("symbol")).collect()
+
+    if args.out is not None:
+        write_normalized(df, args.out)
+        print(f"normalize binance-bookdepth: {df.height} row(s) -> {args.out}")
+        return
+
+    written = write_hive_partitioned(df, GOLD_DIR, "book_depth_pct", "timestamp_utc", merge_key=BOOK_DEPTH_MERGE_KEY)
+    print(f"normalize binance-bookdepth: {df.height} row(s) -> {len(written)} partition(s) under {GOLD_DIR / 'book_depth_pct'}")
 
 
 def _write_trades(df: pl.DataFrame, out: Path | None, label: str) -> None:
@@ -204,6 +233,15 @@ def build_parser() -> argparse.ArgumentParser:
     kraken_p.add_argument("--rps", type=float, default=1.0, help="requests per second")
     kraken_p.set_defaults(func=run_kraken)
 
+    bookdepth_p = subparsers.add_parser(
+        "binance-bookdepth",
+        help="Download daily futures bookDepth (percentage-bucketed order-book depth) archives from data.binance.vision",
+    )
+    bookdepth_p.add_argument("--symbol", required=True, help="e.g. BTCUSDT (futures/um only)")
+    bookdepth_p.add_argument("--start", type=_parse_day, required=True, help="YYYY-MM-DD")
+    bookdepth_p.add_argument("--end", type=_parse_day, required=True, help="YYYY-MM-DD")
+    bookdepth_p.set_defaults(func=run_binance_bookdepth)
+
     normalize_p = subparsers.add_parser("normalize", help="Normalize a downloaded raw archive into the unified schema")
     normalize_sub = normalize_p.add_subparsers(dest="normalize_exchange", required=True)
 
@@ -227,6 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
     norm_kraken_p.add_argument("--pair", required=True, help="e.g. XBTUSD")
     norm_kraken_p.add_argument("--out", type=Path, default=None, help="output .parquet path")
     norm_kraken_p.set_defaults(func=run_normalize_kraken)
+
+    norm_bookdepth_p = normalize_sub.add_parser("binance-bookdepth")
+    norm_bookdepth_p.add_argument("--path", type=Path, required=True, help="path to the downloaded bookDepth .zip archive")
+    norm_bookdepth_p.add_argument("--symbol", required=True, help="e.g. BTCUSDT")
+    norm_bookdepth_p.add_argument("--out", type=Path, default=None, help="output .parquet path")
+    norm_bookdepth_p.set_defaults(func=run_normalize_binance_bookdepth)
 
     resample_p = subparsers.add_parser(
         "resample", help="Resample normalized trades into OHLCV bars with volatility and event tags"

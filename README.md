@@ -22,8 +22,17 @@ Known limitation: symbol normalization (`transform/symbols.py`) is a static best
 
 - [x] Task 3.1 — Tick → 1s/1m/5m OHLCV bars: OHLC, volume, trade count, buy/sell volume split, volume delta, VWAP (`src/crypto_pipeline/features/resample.py`)
 - [x] Task 3.2 (price half) — Rolling realized volatility from bar closes (`src/crypto_pipeline/features/volatility.py`)
-- [ ] Task 3.2 (order-book half) — Spread/mid-price/depth-at-±1%/±2% (`src/crypto_pipeline/features/orderbook.py`) is implemented and unit-tested against synthetic snapshots, but **has no real data source**: Phase 1 never built an L2 order-book harvester (only trade-tick archives), so this can't run end-to-end yet. Building that harvester would need to happen before this task can be marked done.
-- [x] Task 3.3 — Market-event tagging: flash crashes/spikes, volume-surge Z-score anomalies (both bar-based, working now), and liquidity dry-ups (spread-based, blocked on the same missing order-book data) (`src/crypto_pipeline/features/events.py`)
+- [x] Task 3.2 (depth-by-percentage) — `bid_depth_usd_Npct`/`ask_depth_usd_Npct` from Binance's futures `bookDepth` archive (`transform/binance_bookdepth.py`, `features/orderbook.pivot_percentage_depth`). See "Order-book data: what's real and what isn't" below - this is real depth data, but no mid-price/spread.
+- [ ] Task 3.2 (raw per-level BBO/spread) — `add_book_metrics` in `features/orderbook.py` expects per-level `bid_price_i`/`ask_price_i` columns (spec's literal `orderbook_l2_snapshots` shape). It's implemented and unit-tested against synthetic snapshots, but **no exchange publishes that as a free bulk historical archive** - it would need a live WebSocket depth-stream recorder or a paid vendor (e.g. Tardis.dev). Not a Phase 3 gap so much as a "this data doesn't exist for free" gap.
+- [x] Task 3.3 — Market-event tagging: flash crashes/spikes, volume-surge Z-score anomalies (both bar-based, working now), and liquidity dry-ups (spread-based - blocked on the same missing BBO data as above) (`src/crypto_pipeline/features/events.py`)
+
+### Order-book data: what's real and what isn't
+
+True historical per-level L2 order books (raw bid/ask price+size arrays, with best-bid/best-ask so spread is computable) are **not available as free bulk downloads** from Binance, Bybit, or Kraken - only live trades are published that way. The spec's `orderbook_l2_snapshots` schema (section 3.2) assumes that shape, and this pipeline has no source for it.
+
+What *is* real: Binance's futures `bookDepth` daily archive, which publishes cumulative depth/notional in 1%-wide buckets away from the mid price. That's ingested here (`binance-bookdepth` / `normalize binance-bookdepth` CLI commands, landing in `data/gold/book_depth_pct/...`) and gives genuine `bid_depth_usd_1pct`/`bid_depth_usd_2pct`/etc. numbers. It does **not** give mid-price, spread, or spread_bps - Binance doesn't publish historical BBO in bulk either, so liquidity-dry-up detection and negative-spread checks remain unimplementable against real data until a raw-level source exists.
+
+**One more caveat**: `transform/binance_bookdepth.py`'s column-name assumptions (`timestamp,percentage,depth,notional`) are recalled from documentation, not verified against a live download - this machine's network can't reach `data.binance.vision` (see `CLAUDE.md`). Verify against one real downloaded file before relying on this in production; the parser raises a clear error if the columns don't match rather than silently mis-parsing.
 
 **Phase 4: Storage Optimization & Partitioning** — done.
 
@@ -54,6 +63,9 @@ python -m crypto_pipeline.cli bybit --symbol BTCUSD --start 2024-01-01 --end 202
 
 # Kraken historical trades (REST pagination)
 python -m crypto_pipeline.cli kraken --pair XBTUSD --start 2024-01-01 --end 2024-01-02
+
+# Binance futures bookDepth (percentage-bucketed order-book depth, futures/um only)
+python -m crypto_pipeline.cli binance-bookdepth --symbol BTCUSDT --start 2024-01-01 --end 2024-01-07
 ```
 
 Downloaded archives land under `data/bronze/raw/<exchange>/...` (gitignored).
@@ -68,6 +80,9 @@ python -m crypto_pipeline.cli normalize bybit --symbol BTCUSDT --market linear `
 
 python -m crypto_pipeline.cli normalize kraken --pair XBTUSD `
     --path data/bronze/raw/kraken/XBTUSD
+
+python -m crypto_pipeline.cli normalize binance-bookdepth --symbol BTCUSDT `
+    --path data/bronze/raw/binance/futures/um/daily/bookDepth/BTCUSDT/BTCUSDT-bookDepth-2024-01-01.zip
 ```
 
 Normalized trades land under `data/gold/trades/exchange=<exchange>/symbol=<symbol>/year=<YYYY>/month=<MM>/data.parquet` (gitignored) unless `--out` is given for a flat single-file path instead.

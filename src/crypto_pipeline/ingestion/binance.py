@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -69,6 +69,24 @@ def month_range(start: date, end: date) -> list[tuple[int, int]]:
             m = 1
             y += 1
     return months
+
+
+def daily_prefix(market: MarketType, symbol: str, data_type: DataType) -> str:
+    return f"data/{market}/daily/{data_type}/{symbol}/"
+
+
+def build_daily_key(market: MarketType, symbol: str, day: date, data_type: DataType) -> str:
+    return f"data/{market}/daily/{data_type}/{symbol}/{symbol}-{data_type}-{day.isoformat()}.zip"
+
+
+def day_range(start: date, end: date) -> list[date]:
+    """Inclusive list of dates from start to end."""
+    days = []
+    d = start
+    while d <= end:
+        days.append(d)
+        d += timedelta(days=1)
+    return days
 
 
 async def list_archive_files(session: aiohttp.ClientSession, prefix: str) -> list[ArchiveFile]:
@@ -159,3 +177,33 @@ class BinanceArchiveHarvester:
         """List all currently published monthly archives for `symbol` without downloading."""
         prefix = monthly_prefix(market, symbol, data_type)
         return await list_archive_files(self._dm.session, prefix)
+
+    async def harvest_daily(
+        self,
+        market: MarketType,
+        symbol: str,
+        start: date,
+        end: date,
+        data_type: DataType,
+        verify_checksum: bool = True,
+    ) -> list[Path]:
+        """Download every daily archive for `symbol` between `start` and `end` (inclusive).
+
+        Used for archive types Binance only publishes daily rather than
+        monthly, e.g. `bookDepth` (order-book depth-by-percentage,
+        futures/um only - see `transform/binance_bookdepth.py`).
+        """
+        archive_files = [ArchiveFile(key=build_daily_key(market, symbol, d, data_type)) for d in day_range(start, end)]
+
+        results = await asyncio.gather(
+            *(self._harvest_one(af, verify_checksum) for af in archive_files),
+            return_exceptions=True,
+        )
+
+        paths: list[Path] = []
+        for archive_file, result in zip(archive_files, results):
+            if isinstance(result, Exception):
+                logger.error("failed to download %s: %s", archive_file.url, result)
+                continue
+            paths.append(result)
+        return paths

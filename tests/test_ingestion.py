@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from crypto_pipeline.ingestion.binance import build_monthly_key, month_range
+from crypto_pipeline.ingestion.binance import build_daily_key, build_monthly_key, month_range
+from crypto_pipeline.ingestion.binance import day_range as binance_day_range
 from crypto_pipeline.ingestion.bybit import day_range
 from crypto_pipeline.ingestion.download_manager import DownloadManager, _sha256_file
 
@@ -29,6 +30,16 @@ def test_build_monthly_key():
 def test_day_range_inclusive():
     days = day_range(date(2024, 1, 1), date(2024, 1, 3))
     assert days == [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
+
+
+def test_build_daily_key():
+    key = build_daily_key("futures/um", "BTCUSDT", date(2024, 1, 5), "bookDepth")
+    assert key == "data/futures/um/daily/bookDepth/BTCUSDT/BTCUSDT-bookDepth-2024-01-05.zip"
+
+
+def test_binance_day_range_inclusive():
+    days = binance_day_range(date(2024, 1, 1), date(2024, 1, 2))
+    assert days == [date(2024, 1, 1), date(2024, 1, 2)]
 
 
 @pytest.mark.asyncio

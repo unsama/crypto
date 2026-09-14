@@ -1,15 +1,23 @@
 """Task 3.2 (order-book half): spread, mid price, and depth-within-X% metrics.
 
-Operates on a flattened L2 snapshot DataFrame shaped like spec section 3.2
-(`orderbook_l2_snapshots`): `bid_price_{i}`/`bid_size_{i}` and
-`ask_price_{i}`/`ask_size_{i}` columns for depth levels 1..N, plus
-exchange/symbol/timestamp_utc.
+`add_book_metrics` operates on a flattened L2 snapshot DataFrame shaped
+like spec section 3.2 (`orderbook_l2_snapshots`): `bid_price_{i}`/
+`bid_size_{i}` and `ask_price_{i}`/`ask_size_{i}` columns for depth
+levels 1..N, plus exchange/symbol/timestamp_utc.
 
-NOTE: this pipeline does not yet ingest L2 order book snapshots - Phase 1
-only built trade-tick harvesters (Binance/Bybit/Kraken trades archives),
-so there is no real data source feeding this function end-to-end yet.
-The transform is implemented and unit-tested against synthetic snapshots
-so it's ready to plug in once an order book harvester is added.
+NOTE: no exchange this pipeline ingests from publishes that raw
+per-level format as a free bulk historical archive - only live trades
+are freely available that way. `add_book_metrics` is implemented and
+unit-tested against synthetic snapshots so it's ready to plug in if a
+raw-level source is ever added (a recorded WebSocket depth stream, or a
+paid vendor), but has no real data source today.
+
+`pivot_percentage_depth` is the one partial exception: Binance publishes
+a futures `bookDepth` daily archive with *cumulative depth by percentage
+bucket* (not raw levels) - see `transform/binance_bookdepth.py`. It can
+produce real `bid_depth_usd_Npct`/`ask_depth_usd_Npct` values, but never
+`mid_price`/`spread`/`spread_bps` (Binance doesn't publish historical
+best-bid/best-ask in bulk form either).
 """
 
 from __future__ import annotations
@@ -52,3 +60,25 @@ def add_book_metrics(snapshots: pl.DataFrame, depth_levels: int = DEPTH_LEVELS) 
         )
 
     return df
+
+
+def pivot_percentage_depth(book_depth_pct: pl.DataFrame, percentages: tuple[int, ...] = (1, 2)) -> pl.DataFrame:
+    """Pivot Binance bookDepth's long format (one row per percentage bucket) into
+    one row per (exchange, symbol, timestamp_utc) with `bid_depth_usd_Npct` /
+    `ask_depth_usd_Npct` columns - the same column names `add_book_metrics`
+    produces, minus mid_price/spread/spread_bps, which this data source
+    can't provide (see this module's docstring).
+    """
+    result = book_depth_pct.select(["exchange", "symbol", "timestamp_utc"]).unique()
+
+    for pct in percentages:
+        bid = book_depth_pct.filter(pl.col("percentage") == -pct).select(
+            "exchange", "symbol", "timestamp_utc", pl.col("notional").alias(f"bid_depth_usd_{pct}pct")
+        )
+        ask = book_depth_pct.filter(pl.col("percentage") == pct).select(
+            "exchange", "symbol", "timestamp_utc", pl.col("notional").alias(f"ask_depth_usd_{pct}pct")
+        )
+        result = result.join(bid, on=["exchange", "symbol", "timestamp_utc"], how="left")
+        result = result.join(ask, on=["exchange", "symbol", "timestamp_utc"], how="left")
+
+    return result.sort(["exchange", "symbol", "timestamp_utc"])
