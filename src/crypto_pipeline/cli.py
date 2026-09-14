@@ -14,18 +14,27 @@ Examples:
     python -m crypto_pipeline.cli normalize binance --market spot \\
         --symbol BTCUSDT --data-type trades \\
         --path data/bronze/raw/binance/spot/monthly/trades/BTCUSDT/BTCUSDT-trades-2024-01.zip
+
+    python -m crypto_pipeline.cli resample --timeframe 1m \\
+        --path "data/silver/trades/binance/BTC-USDT/*.parquet" \\
+        --out data/gold/bars/binance/BTC-USDT/1m.parquet
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import glob
 import logging
 from datetime import date, datetime
 from pathlib import Path
 
 import aiohttp
+import polars as pl
 
+from crypto_pipeline.features.events import tag_bar_events
+from crypto_pipeline.features.resample import bars_per_window, resample_trades_to_bars
+from crypto_pipeline.features.volatility import add_realized_volatility
 from crypto_pipeline.ingestion.binance import BinanceArchiveHarvester
 from crypto_pipeline.ingestion.bybit import BybitArchiveFetcher
 from crypto_pipeline.ingestion.download_manager import DownloadManager
@@ -98,6 +107,29 @@ async def run_normalize_kraken(args: argparse.Namespace) -> None:
     print(f"normalize kraken: {df.height} row(s) -> {dest}")
 
 
+async def run_resample(args: argparse.Namespace) -> None:
+    paths = sorted(Path(p) for p in glob.glob(args.path))
+    if not paths:
+        raise SystemExit(f"no files matched {args.path!r}")
+
+    df = pl.concat([pl.read_parquet(p) for p in paths])
+    bars = resample_trades_to_bars(df, timeframe=args.timeframe)
+
+    for window in ("1m", "5m"):
+        n = bars_per_window(args.timeframe, window)
+        if n is not None:
+            bars = add_realized_volatility(bars, n, f"realized_vol_{window}")
+        else:
+            logging.getLogger(__name__).info(
+                "skipping realized_vol_%s: %s bars don't divide evenly into a %s window", window, args.timeframe, window
+            )
+
+    bars = tag_bar_events(bars)
+
+    bars.write_parquet(args.out, compression="zstd", compression_level=3)
+    print(f"resample: {bars.height} bar(s) -> {args.out}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crypto_pipeline", description="Phase 1/2 ingestion + normalization CLI")
     parser.add_argument("--concurrency", type=int, default=8)
@@ -147,6 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
     norm_kraken_p.add_argument("--pair", required=True, help="e.g. XBTUSD")
     norm_kraken_p.add_argument("--out", type=Path, default=None, help="output .parquet path")
     norm_kraken_p.set_defaults(func=run_normalize_kraken)
+
+    resample_p = subparsers.add_parser(
+        "resample", help="Resample normalized trades into OHLCV bars with volatility and event tags"
+    )
+    resample_p.add_argument("--path", required=True, help="glob of normalized .parquet trade files to resample")
+    resample_p.add_argument("--timeframe", default="1m", choices=["1s", "1m", "5m"])
+    resample_p.add_argument("--out", type=Path, required=True, help="output .parquet path for the bars")
+    resample_p.set_defaults(func=run_resample)
 
     return parser
 

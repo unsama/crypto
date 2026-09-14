@@ -18,6 +18,13 @@ See [crypto_historical_dataset_pipeline.md](crypto_historical_dataset_pipeline.m
 
 Known limitation: symbol normalization (`transform/symbols.py`) is a static best-effort `BASE-QUOTE` splitter, not a live lookup against each exchange's instruments/assets endpoint — it covers common quote assets and Kraken's major legacy asset codes, but exotic pairs may need the table extended.
 
+**Phase 3: Resampling & Feature Generation** — partially done.
+
+- [x] Task 3.1 — Tick → 1s/1m/5m OHLCV bars: OHLC, volume, trade count, buy/sell volume split, volume delta, VWAP (`src/crypto_pipeline/features/resample.py`)
+- [x] Task 3.2 (price half) — Rolling realized volatility from bar closes (`src/crypto_pipeline/features/volatility.py`)
+- [ ] Task 3.2 (order-book half) — Spread/mid-price/depth-at-±1%/±2% (`src/crypto_pipeline/features/orderbook.py`) is implemented and unit-tested against synthetic snapshots, but **has no real data source**: Phase 1 never built an L2 order-book harvester (only trade-tick archives), so this can't run end-to-end yet. Building that harvester would need to happen before this task can be marked done.
+- [x] Task 3.3 — Market-event tagging: flash crashes/spikes, volume-surge Z-score anomalies (both bar-based, working now), and liquidity dry-ups (spread-based, blocked on the same missing order-book data) (`src/crypto_pipeline/features/events.py`)
+
 ## Setup
 
 ```powershell
@@ -54,6 +61,13 @@ python -m crypto_pipeline.cli normalize kraken --pair XBTUSD `
 ```
 
 Normalized output lands under `data/silver/trades/<exchange>/<symbol>/...parquet` (gitignored) unless `--out` is given.
+
+```powershell
+# Resample normalized trades into OHLCV bars with realized volatility and event tags
+python -m crypto_pipeline.cli resample --timeframe 1m `
+    --path "data/silver/trades/binance/BTC-USDT/*.parquet" `
+    --out data/gold/bars/binance/BTC-USDT/1m.parquet
+```
 
 ## Tests
 
