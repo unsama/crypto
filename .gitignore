@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Data lake (bronze/silver/gold are generated, not versioned)
+data/bronze/**
+data/silver/**
+data/gold/**
+!data/bronze/.gitkeep
+!data/silver/.gitkeep
+!data/gold/.gitkeep
+
+# Raw archive downloads / caches
+*.zip
+*.csv.gz
+*.CHECKSUM
+.cache/
+
+# Env / secrets
+.env
+*.local.yaml
+
+# OS
+.DS_Store
+Thumbs.db
