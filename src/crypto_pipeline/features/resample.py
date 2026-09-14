@@ -24,14 +24,16 @@ BAR_SCHEMA: dict[str, pl.DataType] = {
 
 BAR_COLUMNS = list(BAR_SCHEMA.keys())
 
-_TIMEFRAME_EVERY = {"1s": "1s", "1m": "1m", "5m": "5m"}
-_TIMEFRAME_SECONDS = {"1s": 1, "1m": 60, "5m": 300}
+# Polars duration-string form of each timeframe (also reused by qa/audit.py
+# to build the expected full time grid for gap detection).
+TIMEFRAME_EVERY = {"1s": "1s", "1m": "1m", "5m": "5m"}
+TIMEFRAME_SECONDS = {"1s": 1, "1m": 60, "5m": 300}
 
 
 def bars_per_window(bar_timeframe: str, window: str) -> int | None:
     """How many `bar_timeframe` bars fit in `window` (e.g. "1s","1m" -> 60), or None if it doesn't divide evenly."""
-    bar_secs = _TIMEFRAME_SECONDS[bar_timeframe]
-    window_secs = _TIMEFRAME_SECONDS[window]
+    bar_secs = TIMEFRAME_SECONDS[bar_timeframe]
+    window_secs = TIMEFRAME_SECONDS[window]
     if window_secs < bar_secs or window_secs % bar_secs != 0:
         return None
     return window_secs // bar_secs
@@ -45,13 +47,13 @@ def resample_trades_to_bars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
     `side` and `quantity`/`quote_quantity` columns from the trades_tick
     schema (spec section 3.1).
     """
-    if timeframe not in _TIMEFRAME_EVERY:
+    if timeframe not in TIMEFRAME_EVERY:
         raise ValueError(f"unsupported timeframe {timeframe!r}")
 
     if df.height == 0:
         return pl.DataFrame(schema=BAR_SCHEMA)
 
-    every = _TIMEFRAME_EVERY[timeframe]
+    every = TIMEFRAME_EVERY[timeframe]
     bars = (
         df.lazy()
         .with_columns(pl.from_epoch("timestamp_utc", time_unit="us").alias("_ts"))

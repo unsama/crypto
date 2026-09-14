@@ -30,6 +30,11 @@ Known limitation: symbol normalization (`transform/symbols.py`) is a static best
 - [x] Task 4.1 — Hive-partitioned Parquet: `data/gold/<dataset>/exchange=.../symbol=.../year=.../month=.../data.parquet`, ZSTD level 3 compression, `merge_key`-based idempotent re-runs (`src/crypto_pipeline/storage/partition.py`). This is now the default output of `normalize` and `resample` (pass `--out` for the old flat single-file behavior instead).
 - [x] Task 4.2 — DuckDB query interface reading the partition files directly, no load step (`src/crypto_pipeline/storage/query.py`), exposed via `crypto_pipeline.cli query`.
 
+**Phase 5: QA, Validation & Client Sample Packaging** — done (for trade/bar data; order-book checks share Phase 3's data-source gap).
+
+- [x] Task 5.1 — Data quality auditor: bar-gap detection (a missing bar = a zero-volume/gap interval, since resampling only emits bars that had trades), post-storage price/quantity/timestamp invariant checks, negative-spread check for order-book data (blocked on the same missing L2 source as Phase 3), and an automated markdown summary report (`src/crypto_pipeline/qa/audit.py`, `summary.py`), exposed via `crypto_pipeline.cli report`.
+- [x] Task 5.2 — 24h (configurable) verification sample exporter to CSV + Parquet for any exchange/symbol (`src/crypto_pipeline/qa/sample_export.py`), exposed via `crypto_pipeline.cli sample-export`.
+
 ## Setup
 
 ```powershell
@@ -79,6 +84,13 @@ Bars land under `data/gold/bars/exchange=.../symbol=.../year=.../month=.../data.
 # Query the partitioned lake directly with SQL (DuckDB, no load step)
 python -m crypto_pipeline.cli query --sql "SELECT exchange, symbol, COUNT(*) AS n FROM trades GROUP BY 1, 2"
 python -m crypto_pipeline.cli query --sql "SELECT * FROM bars WHERE is_flash_move ORDER BY bar_timestamp_utc"
+
+# Data-quality summary report (row counts, date ranges, min/max prices, bar gaps)
+python -m crypto_pipeline.cli report --out data/gold/quality_report.md
+
+# 24h verification sample (CSV + Parquet) for one exchange/symbol
+python -m crypto_pipeline.cli sample-export --exchange binance --symbol BTC-USDT `
+    --start 2024-01-01 --out data/samples
 ```
 
 ## Tests

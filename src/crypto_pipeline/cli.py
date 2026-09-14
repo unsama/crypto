@@ -19,6 +19,11 @@ Examples:
         --path "data/gold/trades/exchange=binance/symbol=BTC-USDT/**/data.parquet"
 
     python -m crypto_pipeline.cli query --sql "SELECT COUNT(*) FROM trades"
+
+    python -m crypto_pipeline.cli report --out data/gold/quality_report.md
+
+    python -m crypto_pipeline.cli sample-export --exchange binance --symbol BTC-USDT \\
+        --start 2024-01-01 --out data/samples
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import argparse
 import asyncio
 import glob
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import aiohttp
@@ -41,6 +46,8 @@ from crypto_pipeline.ingestion.binance import BinanceArchiveHarvester
 from crypto_pipeline.ingestion.bybit import BybitArchiveFetcher
 from crypto_pipeline.ingestion.download_manager import DownloadManager
 from crypto_pipeline.ingestion.kraken import KrakenTradesFetcher
+from crypto_pipeline.qa.sample_export import export_sample
+from crypto_pipeline.qa.summary import generate_summary_report
 from crypto_pipeline.storage.partition import write_hive_partitioned
 from crypto_pipeline.storage.query import connect as connect_lake
 from crypto_pipeline.transform.pipeline import (
@@ -60,6 +67,10 @@ def _parse_month(value: str) -> date:
 
 def _parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
 async def run_binance(args: argparse.Namespace) -> None:
@@ -150,6 +161,23 @@ async def run_query(args: argparse.Namespace) -> None:
     con.sql(args.sql).show(max_rows=args.limit)
 
 
+async def run_report(args: argparse.Namespace) -> None:
+    con = connect_lake(args.root)
+    report = generate_summary_report(con)
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(report)
+        print(f"report: wrote -> {args.out}")
+    else:
+        print(report)
+
+
+async def run_sample_export(args: argparse.Namespace) -> None:
+    con = connect_lake(args.root)
+    result = export_sample(con, exchange=args.exchange, symbol=args.symbol, start=args.start, out_dir=args.out, hours=args.hours)
+    print(f"sample-export: {result.row_count} row(s) -> {result.csv_path}, {result.parquet_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crypto_pipeline", description="Phase 1/2 ingestion + normalization CLI")
     parser.add_argument("--concurrency", type=int, default=8)
@@ -215,6 +243,20 @@ def build_parser() -> argparse.ArgumentParser:
     query_p.add_argument("--sql", required=True, help='e.g. "SELECT COUNT(*) FROM trades"')
     query_p.add_argument("--limit", type=int, default=100, help="max rows to print")
     query_p.set_defaults(func=run_query)
+
+    report_p = subparsers.add_parser("report", help="Generate a data-quality summary markdown report")
+    report_p.add_argument("--root", type=Path, default=GOLD_DIR, help="lake root (default: data/gold)")
+    report_p.add_argument("--out", type=Path, default=None, help="write the report here instead of stdout")
+    report_p.set_defaults(func=run_report)
+
+    sample_p = subparsers.add_parser("sample-export", help="Export a verification sample (CSV + Parquet)")
+    sample_p.add_argument("--root", type=Path, default=GOLD_DIR, help="lake root (default: data/gold)")
+    sample_p.add_argument("--exchange", required=True)
+    sample_p.add_argument("--symbol", required=True, help="normalized symbol, e.g. BTC-USDT")
+    sample_p.add_argument("--start", type=_parse_utc_datetime, required=True, help="YYYY-MM-DD (UTC)")
+    sample_p.add_argument("--hours", type=int, default=24)
+    sample_p.add_argument("--out", type=Path, required=True, help="output directory")
+    sample_p.set_defaults(func=run_sample_export)
 
     return parser
 

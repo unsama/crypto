@@ -4,13 +4,13 @@ Historical cryptocurrency data ETL pipeline. Full spec and 5-phase roadmap: `cry
 
 ## Status
 
-Phase 1 (ingestion), Phase 2 (normalization), and Phase 4 (partitioned storage) are done; Phase 3 (resampling & features) is partially done. See `README.md` for the up-to-date phase checklist.
+Phases 1, 2, 4, and 5 are done; Phase 3 (resampling & features) is partially done - order-book metrics and the liquidity-dry-up rule have no real data source (see below). See `README.md` for the up-to-date phase checklist.
 
 ## Structure
 
 ```
 src/crypto_pipeline/
-  cli.py                     # entrypoint: python -m crypto_pipeline.cli <binance|bybit|kraken|normalize|resample|query>
+  cli.py                     # entrypoint: python -m crypto_pipeline.cli <binance|bybit|kraken|normalize|resample|query|report|sample-export>
   config.py                  # DATA_ROOT / BRONZE / SILVER / GOLD paths
   ingestion/
     download_manager.py      # shared resumable/retrying/rate-limited/caching downloader
@@ -23,14 +23,18 @@ src/crypto_pipeline/
     binance.py, bybit.py, kraken.py  # raw archive -> unified schema parsers (Task 2.1)
     pipeline.py                # normalize_*_file() + write_normalized() (flat, --out path) used by the CLI
   features/
-    resample.py                # tick trades -> OHLCV bars (Task 3.1)
+    resample.py                # tick trades -> OHLCV bars (Task 3.1); TIMEFRAME_EVERY/TIMEFRAME_SECONDS reused by qa/audit.py
     volatility.py               # rolling realized volatility from bar closes (Task 3.2, price half)
     orderbook.py                 # spread/mid-price/depth metrics (Task 3.2, order-book half - no data source yet, see below)
     events.py                    # flash-move, volume-surge, liquidity-dry-up tagging (Task 3.3)
   storage/
     partition.py                # write_hive_partitioned(): exchange/symbol/year/month Parquet layout (Task 4.1)
     query.py                     # DuckDB connect() registering a view per dataset dir (Task 4.2)
-tests/                        # pytest, unit-level only (no live network calls; transform/feature/storage tests use synthetic fixtures)
+  qa/
+    audit.py                     # detect_bar_gaps / detect_price_anomalies / detect_negative_spreads (Task 5.1)
+    summary.py                    # generate_summary_report(): markdown report over a DuckDB connection (Task 5.1)
+    sample_export.py              # export_sample(): CSV+Parquet verification slice for one exchange/symbol (Task 5.2)
+tests/                        # pytest, unit-level only (no live network calls; transform/feature/storage/qa tests use synthetic fixtures)
 data/{bronze,silver,gold}/    # gitignored data lake; only .gitkeep is tracked
 ```
 
@@ -54,4 +58,5 @@ python -m crypto_pipeline.cli binance --market spot --symbol BTCUSDT --start 202
 - Rolling/Z-score baselines should exclude the current row (see `tag_volume_surges`'s use of `.shift(1)`) - including it dilutes exactly the anomaly you're trying to detect.
 - `write_hive_partitioned`'s idempotency depends on `merge_key`: pass it (e.g. `["exchange","symbol","trade_id"]`) when a partition may receive overlapping data across separate runs (e.g. daily Bybit files landing in the same month); omit it only when each call fully owns a partition's data for that run.
 - `glob.glob()` needs `recursive=True` for a `**` pattern to actually recurse - a bug in `run_resample` was caught by smoke-testing the CLI end-to-end rather than only unit tests, and is now fixed. Prefer an end-to-end CLI smoke test (not just unit tests) when changing path-globbing or CLI wiring.
-- Phase 5 (QA/validation, sample export) is not implemented yet — don't assume those modules exist.
+- This machine's local timezone is Asia/Karachi (UTC+5), which is *not* UTC - a DuckDB `to_timestamp()` column rendered as `+05:00`-shifted local time despite being labeled "(UTC)" in the `report` command, caught by the same kind of CLI smoke test. Use `make_timestamp(<epoch_us>)` (not `to_timestamp(<epoch_s>)`) to get a naive UTC-wall-clock timestamp with no local-zone conversion. Windows also has no built-in IANA tzdata - the `tzdata` package is a dependency (Windows-only marker in pyproject.toml) so `zoneinfo`/duckdb/polars timezone lookups don't crash.
+- Phase 5 (QA/validation, sample export) is done - see `qa/` above.
