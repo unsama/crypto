@@ -16,8 +16,9 @@ Examples:
         --path data/bronze/raw/binance/spot/monthly/trades/BTCUSDT/BTCUSDT-trades-2024-01.zip
 
     python -m crypto_pipeline.cli resample --timeframe 1m \\
-        --path "data/silver/trades/binance/BTC-USDT/*.parquet" \\
-        --out data/gold/bars/binance/BTC-USDT/1m.parquet
+        --path "data/gold/trades/exchange=binance/symbol=BTC-USDT/**/data.parquet"
+
+    python -m crypto_pipeline.cli query --sql "SELECT COUNT(*) FROM trades"
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from pathlib import Path
 import aiohttp
 import polars as pl
 
+from crypto_pipeline.config import GOLD_DIR
 from crypto_pipeline.features.events import tag_bar_events
 from crypto_pipeline.features.resample import bars_per_window, resample_trades_to_bars
 from crypto_pipeline.features.volatility import add_realized_volatility
@@ -39,13 +41,17 @@ from crypto_pipeline.ingestion.binance import BinanceArchiveHarvester
 from crypto_pipeline.ingestion.bybit import BybitArchiveFetcher
 from crypto_pipeline.ingestion.download_manager import DownloadManager
 from crypto_pipeline.ingestion.kraken import KrakenTradesFetcher
+from crypto_pipeline.storage.partition import write_hive_partitioned
+from crypto_pipeline.storage.query import connect as connect_lake
 from crypto_pipeline.transform.pipeline import (
-    default_dest_path,
     normalize_binance_file,
     normalize_bybit_file,
     normalize_kraken_pair,
     write_normalized,
 )
+
+TRADE_MERGE_KEY = ["exchange", "symbol", "trade_id"]
+BAR_MERGE_KEY = ["exchange", "symbol", "timeframe", "bar_timestamp_utc"]
 
 
 def _parse_month(value: str) -> date:
@@ -86,29 +92,32 @@ async def run_kraken(args: argparse.Namespace) -> None:
         print(f"kraken: {len(pages)} page(s), {total_trades} trade(s)")
 
 
+def _write_trades(df: pl.DataFrame, out: Path | None, label: str) -> None:
+    if out is not None:
+        write_normalized(df, out)
+        print(f"normalize {label}: {df.height} row(s) -> {out}")
+        return
+    written = write_hive_partitioned(df, GOLD_DIR, "trades", "timestamp_utc", merge_key=TRADE_MERGE_KEY)
+    print(f"normalize {label}: {df.height} row(s) -> {len(written)} partition(s) under {GOLD_DIR / 'trades'}")
+
+
 async def run_normalize_binance(args: argparse.Namespace) -> None:
     df = normalize_binance_file(args.path, market=args.market, symbol=args.symbol, data_type=args.data_type)
-    dest = args.out or default_dest_path("binance", args.symbol, args.path)
-    write_normalized(df, dest)
-    print(f"normalize binance: {df.height} row(s) -> {dest}")
+    _write_trades(df, args.out, "binance")
 
 
 async def run_normalize_bybit(args: argparse.Namespace) -> None:
     df = normalize_bybit_file(args.path, symbol=args.symbol, market=args.market)
-    dest = args.out or default_dest_path("bybit", args.symbol, args.path)
-    write_normalized(df, dest)
-    print(f"normalize bybit: {df.height} row(s) -> {dest}")
+    _write_trades(df, args.out, "bybit")
 
 
 async def run_normalize_kraken(args: argparse.Namespace) -> None:
     df = normalize_kraken_pair(args.path, pair=args.pair)
-    dest = args.out or default_dest_path("kraken", args.pair, args.path)
-    write_normalized(df, dest)
-    print(f"normalize kraken: {df.height} row(s) -> {dest}")
+    _write_trades(df, args.out, "kraken")
 
 
 async def run_resample(args: argparse.Namespace) -> None:
-    paths = sorted(Path(p) for p in glob.glob(args.path))
+    paths = sorted(Path(p) for p in glob.glob(args.path, recursive=True))
     if not paths:
         raise SystemExit(f"no files matched {args.path!r}")
 
@@ -126,8 +135,19 @@ async def run_resample(args: argparse.Namespace) -> None:
 
     bars = tag_bar_events(bars)
 
-    bars.write_parquet(args.out, compression="zstd", compression_level=3)
-    print(f"resample: {bars.height} bar(s) -> {args.out}")
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        bars.write_parquet(args.out, compression="zstd", compression_level=3)
+        print(f"resample: {bars.height} bar(s) -> {args.out}")
+        return
+
+    written = write_hive_partitioned(bars, GOLD_DIR, "bars", "bar_timestamp_utc", merge_key=BAR_MERGE_KEY)
+    print(f"resample: {bars.height} bar(s) -> {len(written)} partition(s) under {GOLD_DIR / 'bars'}")
+
+
+async def run_query(args: argparse.Namespace) -> None:
+    con = connect_lake(args.root)
+    con.sql(args.sql).show(max_rows=args.limit)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,8 +205,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resample_p.add_argument("--path", required=True, help="glob of normalized .parquet trade files to resample")
     resample_p.add_argument("--timeframe", default="1m", choices=["1s", "1m", "5m"])
-    resample_p.add_argument("--out", type=Path, required=True, help="output .parquet path for the bars")
+    resample_p.add_argument(
+        "--out", type=Path, default=None, help="output .parquet path (default: hive-partitioned under data/gold/bars)"
+    )
     resample_p.set_defaults(func=run_resample)
+
+    query_p = subparsers.add_parser("query", help="Run a SQL query against the partitioned Parquet lake via DuckDB")
+    query_p.add_argument("--root", type=Path, default=GOLD_DIR, help="lake root (default: data/gold)")
+    query_p.add_argument("--sql", required=True, help='e.g. "SELECT COUNT(*) FROM trades"')
+    query_p.add_argument("--limit", type=int, default=100, help="max rows to print")
+    query_p.set_defaults(func=run_query)
 
     return parser
 

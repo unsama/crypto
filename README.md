@@ -25,6 +25,11 @@ Known limitation: symbol normalization (`transform/symbols.py`) is a static best
 - [ ] Task 3.2 (order-book half) — Spread/mid-price/depth-at-±1%/±2% (`src/crypto_pipeline/features/orderbook.py`) is implemented and unit-tested against synthetic snapshots, but **has no real data source**: Phase 1 never built an L2 order-book harvester (only trade-tick archives), so this can't run end-to-end yet. Building that harvester would need to happen before this task can be marked done.
 - [x] Task 3.3 — Market-event tagging: flash crashes/spikes, volume-surge Z-score anomalies (both bar-based, working now), and liquidity dry-ups (spread-based, blocked on the same missing order-book data) (`src/crypto_pipeline/features/events.py`)
 
+**Phase 4: Storage Optimization & Partitioning** — done.
+
+- [x] Task 4.1 — Hive-partitioned Parquet: `data/gold/<dataset>/exchange=.../symbol=.../year=.../month=.../data.parquet`, ZSTD level 3 compression, `merge_key`-based idempotent re-runs (`src/crypto_pipeline/storage/partition.py`). This is now the default output of `normalize` and `resample` (pass `--out` for the old flat single-file behavior instead).
+- [x] Task 4.2 — DuckDB query interface reading the partition files directly, no load step (`src/crypto_pipeline/storage/query.py`), exposed via `crypto_pipeline.cli query`.
+
 ## Setup
 
 ```powershell
@@ -60,13 +65,20 @@ python -m crypto_pipeline.cli normalize kraken --pair XBTUSD `
     --path data/bronze/raw/kraken/XBTUSD
 ```
 
-Normalized output lands under `data/silver/trades/<exchange>/<symbol>/...parquet` (gitignored) unless `--out` is given.
+Normalized trades land under `data/gold/trades/exchange=<exchange>/symbol=<symbol>/year=<YYYY>/month=<MM>/data.parquet` (gitignored) unless `--out` is given for a flat single-file path instead.
 
 ```powershell
 # Resample normalized trades into OHLCV bars with realized volatility and event tags
 python -m crypto_pipeline.cli resample --timeframe 1m `
-    --path "data/silver/trades/binance/BTC-USDT/*.parquet" `
-    --out data/gold/bars/binance/BTC-USDT/1m.parquet
+    --path "data/gold/trades/exchange=binance/symbol=BTC-USDT/**/data.parquet"
+```
+
+Bars land under `data/gold/bars/exchange=.../symbol=.../year=.../month=.../data.parquet` the same way.
+
+```powershell
+# Query the partitioned lake directly with SQL (DuckDB, no load step)
+python -m crypto_pipeline.cli query --sql "SELECT exchange, symbol, COUNT(*) AS n FROM trades GROUP BY 1, 2"
+python -m crypto_pipeline.cli query --sql "SELECT * FROM bars WHERE is_flash_move ORDER BY bar_timestamp_utc"
 ```
 
 ## Tests
